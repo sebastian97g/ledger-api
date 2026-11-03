@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell.exe:*)",
+      "Bash(chmod +x /c/microservices/ledger-api/run.sh)",
+      "Bash(./mvnw clean:*)",
+      "Bash(./mvnw help:effective-pom)",
+      "Bash(./mvnw dependency:tree)",
+      "Bash(jar tf:*)",
+      "Bash(jar xf:*)",
+      "Read(//c/tmp/**)",
+      "Read(//tmp/tools/jackson/databind/**)",
+      "Bash(./mvnw compile:*)",
+      "Bash(./mvnw test-compile:*)",
+      "Bash(./mvnw test:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

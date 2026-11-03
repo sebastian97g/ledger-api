@@ -1,13 +1,4 @@
 package com.example.ledgerapi;
 
-import org.junit.jupiter.api.Test;
-import org.springframework.boot.test.context.SpringBootTest;
-
-@SpringBootTest
-class LedgerApiApplicationTests {
-
-    @Test
-    void contextLoads() {
-    }
-
-}
+// Placeholder - see src/test/java/com/example/ledger/ for actual tests
+public class LedgerApiApplicationTests {}

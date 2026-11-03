@@ -1,0 +1,578 @@
+openapi: 3.1.0
+info:
+  title: Ledger API
+  description: |
+    Double-entry ledger service for a payments platform.
+    Records where money is and how it moved. Money lives in accounts
+    and moves only through transactions.
+  version: 1.0.0
+  contact:
+    name: Ledger Team
+
+servers:
+  - url: /v1
+    description: API v1
+
+paths:
+  /accounts:
+    post:
+      operationId: openAccount
+      summary: Open a new account
+      description: |
+        Creates an account with the specified currency and optional overdraft limit.
+        Idempotent — opening the same account twice returns the same result.
+        Requires Idempotency-Key header.
+      tags: [Accounts]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenAccountRequest'
+      responses:
+        '201':
+          description: Account created
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URI of the created account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '200':
+          description: Idempotent replay — account already exists (same key, same body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '400':
+          description: Invalid input (missing Idempotency-Key, not valid ISO 4217 code)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '409':
+          description: Idempotency key conflict — same key used with different body
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '422':
+          description: Valid ISO 4217 code but unsupported currency
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+
+  /accounts/{accountId}:
+    get:
+      operationId: getAccount
+      summary: Read an account with its current balance
+      tags: [Accounts]
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Account found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '404':
+          description: Account not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+
+  /accounts/{accountId}/entries:
+    get:
+      operationId: listAccountEntries
+      summary: Browse account entries (newest first, paginated)
+      description: |
+        Returns entries for the account in reverse chronological order.
+        Each entry includes the balance after it was applied.
+        Uses cursor-based pagination.
+      tags: [Accounts]
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque cursor from a previous response for the next page
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Maximum number of entries to return
+      responses:
+        '200':
+          description: Entries page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntryPage'
+        '404':
+          description: Account not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+
+  /transactions:
+    post:
+      operationId: recordTransaction
+      summary: Record a new transaction
+      description: |
+        Records a multi-entry double-entry transaction. All entries must balance
+        (total debits == total credits), reference accounts in the same currency,
+        respect currency decimal precision, and not breach any overdraft limit.
+        Requires Idempotency-Key header.
+      tags: [Transactions]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordTransactionRequest'
+      responses:
+        '201':
+          description: Transaction recorded
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URI of the recorded transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '200':
+          description: Idempotent replay — transaction already recorded (same key, same body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '400':
+          description: Invalid input (missing Idempotency-Key, malformed body, < 2 entries)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '409':
+          description: Idempotency key conflict — same key used with different body
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '422':
+          description: |
+            Business rule violation: unbalanced entries, overdraft breach,
+            currency mismatch, decimal precision exceeded, unknown account in entry.
+            Error includes JSON Pointer to the faulty field.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+
+  /transactions/{transactionId}:
+    get:
+      operationId: getTransaction
+      summary: Read a transaction with all its entries
+      tags: [Transactions]
+      parameters:
+        - $ref: '#/components/parameters/TransactionId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Transaction found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '404':
+          description: Transaction not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+
+  /transactions/{transactionId}/reversal:
+    post:
+      operationId: reverseTransaction
+      summary: Reverse a transaction
+      description: |
+        Creates a new transaction with every entry flipped, linked to the original.
+        A transaction can be reversed at most once. Reversals cannot be reversed.
+        Overdraft limits apply to the reversal.
+        Requires Idempotency-Key header.
+      tags: [Transactions]
+      parameters:
+        - $ref: '#/components/parameters/TransactionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReverseTransactionRequest'
+      responses:
+        '201':
+          description: Reversal recorded
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URI of the reversal transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '200':
+          description: Idempotent replay — reversal already recorded (same key, same body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '400':
+          description: Invalid input (missing Idempotency-Key)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '404':
+          description: Original transaction not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '409':
+          description: |
+            Conflict: transaction already reversed, or idempotency key conflict
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '422':
+          description: |
+            Business rule violation: cannot reverse a reversal, overdraft breach
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        maxLength: 255
+      description: |
+        Unique key for idempotent request processing. Required on all POST requests.
+        Same key + same body = replay stored response.
+        Same key + different body = 409 Conflict.
+
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 255
+      description: Correlation ID for distributed tracing. Generated if not provided.
+
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Account identifier (UUIDv7)
+
+    TransactionId:
+      name: transactionId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Transaction identifier (UUIDv7)
+
+  schemas:
+    OpenAccountRequest:
+      type: object
+      required: [currency]
+      properties:
+        currency:
+          type: string
+          description: ISO 4217 currency code (supported: EUR, USD, JPY)
+          example: EUR
+        overdraftLimit:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: |
+            Maximum amount the balance may go below zero.
+            String to preserve decimal precision. Default "0".
+          example: "0"
+
+    RecordTransactionRequest:
+      type: object
+      required: [entries]
+      properties:
+        description:
+          type: string
+          maxLength: 255
+          description: Optional human-readable description
+          example: Payout to merchant with fee split
+        entries:
+          type: array
+          minItems: 2
+          items:
+            $ref: '#/components/schemas/EntryRequest'
+
+    EntryRequest:
+      type: object
+      required: [accountId, direction, amount]
+      properties:
+        accountId:
+          type: string
+          format: uuid
+          description: Account identifier
+        direction:
+          type: string
+          enum: [DEBIT, CREDIT]
+        amount:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: |
+            Positive amount as string to preserve decimal precision.
+            Decimal places must not exceed the account currency's allowed precision.
+          example: "125.50"
+
+    ReverseTransactionRequest:
+      type: object
+      properties:
+        description:
+          type: string
+          maxLength: 255
+          description: Optional description for the reversal transaction
+
+    AccountResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        currency:
+          type: string
+          example: EUR
+        overdraftLimit:
+          type: string
+          description: Decimal string; null if unlimited (Settlement accounts)
+          example: "0"
+        balance:
+          type: string
+          description: Current balance as decimal string
+          example: "125.50"
+        createdAt:
+          type: string
+          format: date-time
+
+    TransactionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        description:
+          type: string
+        currency:
+          type: string
+        recordedAt:
+          type: string
+          format: date-time
+        reversesTransactionId:
+          type: string
+          format: uuid
+          description: Present only if this is a reversal
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/EntryResponse'
+
+    EntryResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        direction:
+          type: string
+          enum: [DEBIT, CREDIT]
+        amount:
+          type: string
+          example: "125.50"
+        balanceAfter:
+          type: string
+          example: "0.00"
+
+    EntryPage:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccountEntryResponse'
+        nextCursor:
+          type: string
+          description: Opaque cursor for the next page. Null if no more pages.
+        hasMore:
+          type: boolean
+
+    AccountEntryResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        transactionId:
+          type: string
+          format: uuid
+        direction:
+          type: string
+          enum: [DEBIT, CREDIT]
+        amount:
+          type: string
+          example: "125.50"
+        balanceAfter:
+          type: string
+          example: "250.00"
+        createdAt:
+          type: string
+          format: date-time
+
+    ProblemDetail:
+      type: object
+      description: RFC 9457 Problem Details
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI identifying the problem type
+        title:
+          type: string
+          description: Short human-readable summary
+        status:
+          type: integer
+          description: HTTP status code
+        detail:
+          type: string
+          description: Human-readable explanation
+        instance:
+          type: string
+          format: uri
+          description: URI identifying this occurrence
+        code:
+          type: string
+          description: Stable machine-readable error code
+          example: OVERDRAFT_EXCEEDED
+        errors:
+          type: array
+          description: Field-level errors with JSON Pointers
+          items:
+            $ref: '#/components/schemas/FieldError'
+
+    FieldError:
+      type: object
+      properties:
+        pointer:
+          type: string
+          description: JSON Pointer to the faulty field
+          example: /entries/1/amount
+        code:
+          type: string
+          description: Machine-readable error code
+          example: DECIMAL_PRECISION_EXCEEDED
+        detail:
+          type: string
+          description: Human-readable explanation
+          example: "JPY does not allow decimal places"
+
+    # --- Kafka message schemas (documented, not REST) ---
+
+    PaymentSettledMessage:
+      type: object
+      description: |
+        Inbound Kafka message on topic `payments.settled`.
+        Not a REST schema — documented here for contract completeness.
+      required: [eventId, paymentId, merchantAccountId, amount, currency]
+      properties:
+        eventId:
+          type: string
+          description: Broker-assigned event identifier (for tracing, not dedup)
+        paymentId:
+          type: string
+          description: Business payment identifier (dedup key)
+        merchantAccountId:
+          type: string
+          format: uuid
+        amount:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+        currency:
+          type: string
+
+    TransactionRecordedEvent:
+      type: object
+      description: |
+        Outbound Kafka message on topic `ledger.transactions.recorded`.
+        Partition key = account ID (per-account ordering).
+        Not a REST schema — documented here for contract completeness.
+      properties:
+        transactionId:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+          description: The account this event is partitioned by
+        currency:
+          type: string
+        description:
+          type: string
+        recordedAt:
+          type: string
+          format: date-time
+        reversesTransactionId:
+          type: string
+          format: uuid
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/EntryResponse'
+        correlationId:
+          type: string
